@@ -2,11 +2,7 @@
 #include <SDL_mixer.h>
 #include <math.h>
 #include <stdarg.h>
-#include <stdio.h>
-#include <stdlib.h>
-#include <string.h>
 #include <assert.h>
-#include <errno.h>
 #include <time.h>
 #ifdef _3DS
 #include <3ds.h>
@@ -201,34 +197,9 @@ int buttons_state = 0;
 	}                                                     \
 } while(0)
 
-static void p8_rectfill(int x0, int y0, int x1, int y1, int col);
-static void p8_print(const char* str, int x, int y, int col);
-
-//on-screen display (for info, such as loading a state, toggling screenshake, toggling fullscreen, etc)
-static char osd_text[200] = "";
-static int osd_timer = 0;
-static void OSDset(const char* fmt, ...) {
-	va_list ap;
-	va_start(ap, fmt);
-	vsnprintf(osd_text, sizeof osd_text, fmt, ap);
-	osd_text[sizeof osd_text - 1] = '\0'; //make sure to add NUL terminator in case of truncation
-	printf("%s\n", osd_text);
-	osd_timer = 30;
-	va_end(ap);
-}
-static void OSDdraw(void) {
-	if (osd_timer > 0) {
-		--osd_timer;
-		const int x = 4;
-		const int y = 120 + (osd_timer < 10 ? 10-osd_timer : 0); //disappear by going below the screen
-		p8_rectfill(x-2, y-2, x+4*strlen(osd_text), y+6, 6); //outline
-		p8_rectfill(x-1, y-1, x+4*strlen(osd_text)-1, y+5, 0);
-		p8_print(osd_text, x, y, 7);
-	}
-}
+static void p8_print(char* str, float x, float y, int col);
 	
 static Mix_Music* current_music = NULL;
-static _Bool enable_screenshake = 1;
 
 int main(int argc, char** argv) {
 	SDL_CHECK(SDL_Init(SDL_INIT_AUDIO | SDL_INIT_VIDEO | SDL_INIT_JOYSTICK) == 0);
@@ -241,8 +212,7 @@ int main(int argc, char** argv) {
 	SDL_N3DSKeyBind(KEY_CPAD_DOWN|KEY_CSTICK_DOWN, SDLK_DOWN);
 	SDL_N3DSKeyBind(KEY_CPAD_LEFT|KEY_CSTICK_LEFT, SDLK_LEFT);
 	SDL_N3DSKeyBind(KEY_CPAD_RIGHT|KEY_CSTICK_RIGHT, SDLK_RIGHT);
-	SDL_N3DSKeyBind(KEY_SELECT, SDLK_F11); //to switch full screen
-	SDL_N3DSKeyBind(KEY_START, SDLK_ESCAPE); //to pause
+	SDL_N3DSKeyBind(KEY_SELECT, SDLK_f); //to switch full screen
 	
 	SDL_N3DSKeyBind(KEY_Y, SDLK_LSHIFT); //hold to reset / load/save state
 	SDL_N3DSKeyBind(KEY_L, SDLK_d); //load state
@@ -304,19 +274,12 @@ int main(int argc, char** argv) {
 
 	LoadData();
 
-	int pico8emu(CELESTE_P8_CALLBACK_TYPE call, ...);
+	Celeste_P8_val pico8emu(CELESTE_P8_CALLBACK_TYPE call, ...);
 	Celeste_P8_set_call_func(pico8emu);
 
 	//for reset
 	void* initial_game_state = SDL_malloc(Celeste_P8_get_state_size());
 	if (initial_game_state) Celeste_P8_save_state(initial_game_state);
-
-	if (TAS) {
-		// a consistent seed for tas playback
-		Celeste_P8_set_rndseed(8);
-	} else {
-		Celeste_P8_set_rndseed((unsigned)(time(NULL) + SDL_GetTicks()));
-	}
 
 	Celeste_P8_init();
 
@@ -328,27 +291,24 @@ int main(int argc, char** argv) {
 
 	int running = 1;
 	int paused = 0;
+	int b=-1;
 	int b2 = -1;
 	int b3=-1;
 	int deadzone = 8000;
+	Sint16 axis0, axis1;
+	Uint8 but0, but1, but2, but3;
 	SDL_WM_ToggleFullScreen(screen);
 	while (running) {
 		Uint8* kbstate = SDL_GetKeyState(NULL);
 		void SDL_JoystickUpdate(void);
 		static int reset_input_timer = 0;
-		//hold F9 (select+start+y) to reset
-		if (initial_game_state != NULL
-#ifdef _3DS
-				&& kbstate[SDLK_LSHIFT] && kbstate[SDLK_ESCAPE] && kbstate[SDLK_F11]
-#else
-				&& kbstate[SDLK_F9]
-#endif
-		) {
+		//hold shift+return+r (select+start+y) to reset
+		if (initial_game_state != NULL && kbstate[SDLK_LSHIFT] && kbstate[SDLK_RETURN] && (kbstate[SDLK_r] || kbstate[SDLK_f])) {
 			reset_input_timer++;
 			if (reset_input_timer >= 30) {
 				reset_input_timer=0;
 				//reset
-				OSDset("reset");
+				printf("game reset\n");
 				paused = 0;
 				Celeste_P8_load_state(initial_game_state);
 				Mix_HaltChannel(-1);
@@ -360,6 +320,9 @@ int main(int argc, char** argv) {
 		//printf("\nvalues : juse = %d", juse);
 		while (SDL_PollEvent(&ev)) switch (ev.type) {
 			case SDL_QUIT: running = 0; break;
+			
+			//disable keyboard controls to prevent accidental presses
+			
 			//case SDL_KEYDOWN: {
 				//if (ev.key.keysym.sym == SDLK_ESCAPE) {
 					//SDL_JoystickClose(joystick);
@@ -435,13 +398,17 @@ int main(int argc, char** argv) {
 					break;
 				} 
 			}
+			//commented out controll method doesn't work
+			//left in for reference
+			
 			//printf("\nvalues : juse = %d", juse);
 			//case SDL_JOYAXISMOTION:{ // Handle Joystick Motion
 				//int down = 1;
 				//int b = -1;
 				//if (ev.jaxis.axis == 0){
-					//if (ev.jaxis.value > deadzone) b=b2=1;
-					//else if (ev.jaxis.value < -deadzone) {b=b2=0;}
+					////printf("\nvalues : axisnum0 = %d", ev.jaxis.value);
+					//if (ev.jaxis.value > deadzone) {b=b2=1;buttons_state |= (1<<b);buttons_state &= ~(1<<0);}
+					//else if (ev.jaxis.value < -deadzone) {b=b2=0;buttons_state |= (1<<b);buttons_state &= ~(1<<1);}
 					//else {
 						
 						//buttons_state &= ~(1<<1);
@@ -449,23 +416,18 @@ int main(int argc, char** argv) {
 						//down = 0;
 					//}
 					////printf("\nvalues : axis_values = %d", ev.jaxis.value);
-				//if (b2>=0){
-					//if (down) buttons_state |= (1<<b);
-					//else buttons_state &= ~(1<<b2);
-				//}
+				
 				//}
 				//else if (ev.jaxis.axis == 1){
-					//if (ev.jaxis.value > deadzone) {b=b3=3;}
-					//else if (ev.jaxis.value < -deadzone) {b=b3=2;}
+					////printf("\nvalues : axisnum1 = %d", ev.jaxis.value);
+					//if (ev.jaxis.value > deadzone) {b=b3=3;buttons_state |= (1<<b);buttons_state &= ~(1<<2);}
+					//else if (ev.jaxis.value < -deadzone) {b=b3=2;buttons_state |= (1<<b);buttons_state &= ~(1<<3);}
 					//else {
 						//buttons_state &= ~(1<<3);
 						//buttons_state &= ~(1<<2);
 						//down = 0;
 					//}
-				//if (b3>=0){
-					//if (down) buttons_state |= (1<<b);
-					//else buttons_state &= ~(1<<b3);
-				//}	
+				
 				//}
 				
 				////else down = 0;
@@ -476,16 +438,16 @@ int main(int argc, char** argv) {
 				////}
 			
 			//}
-			//
+			
 			
 			case SDL_JOYBUTTONUP: { //Handle Button Presses
 				int down = ev.type == SDL_JOYBUTTONDOWN;	
 				int b = -1;
 				switch (ev.jbutton.button) {
-					case 16:  b = 0; break;
-					case 17: b = 1; break;
-					case 14:    b = 2; break;
-					case 15:  b = 3; break;
+					//case 16:  b = 0; break;
+					//case 17: b = 1; break;
+					//case 14:    b = 2; break;
+					//case 15:  b = 3; break;
 					case  0: case 1: b=4; break;
 					case  3: case 2: b=5; break;
 					default: break;
@@ -518,27 +480,37 @@ int main(int argc, char** argv) {
 				//}
 			//}
 		}
-
-		if (TAS && !paused) {
-			static int t = 0;
-			t++;
-			if (t==1) buttons_state = 1<<4;
-			else if (t > 80) {
-				fscanf(TAS, "%d,", &buttons_state);
-			} else buttons_state = 0;
-		}
-
+		
+		axis0 = SDL_JoystickGetAxis(joystick, 0);
+		axis1 = SDL_JoystickGetAxis(joystick, 1);
+		but0=SDL_JoystickGetButton(joystick, 16); //left
+		but1=SDL_JoystickGetButton(joystick, 17); //right
+		but2=SDL_JoystickGetButton(joystick, 14); //up
+		but3=SDL_JoystickGetButton(joystick, 15); //down
+		
+		if (axis0 > deadzone) {b=1;buttons_state |= (1<<b);buttons_state &= ~(1<<0);}
+		else if (axis0 < -deadzone) {b=0;buttons_state |= (1<<b);buttons_state &= ~(1<<1);}
+		else if (but0 != 0) {b=0;buttons_state |= (1<<b);buttons_state &= ~(1<<1);}
+		else if (but1 != 0) {b=1;buttons_state |= (1<<b);buttons_state &= ~(1<<0);}
+		else {buttons_state &= ~(1<<0);buttons_state &= ~(1<<1);}
+		
+		if (axis1 > deadzone) {b=3;buttons_state |= (1<<b);buttons_state &= ~(1<<2);}
+		else if (axis1 < -deadzone) {b=2;buttons_state |= (1<<b);buttons_state &= ~(1<<3);}
+		else if (but2 != 0) {b=2;buttons_state |= (1<<b);buttons_state &= ~(1<<3);}
+		else if (but3 != 0) {b=3;buttons_state |= (1<<b);buttons_state &= ~(1<<2);}
+		else {buttons_state &= ~(1<<2);buttons_state &= ~(1<<3);}
+		
+		
+		
+		
 		if (paused) {
-			const int x0 = PICO8_W/2-3*4, y0 = 8;
-
-			p8_rectfill(x0-1,y0-1, 6*4+x0+1,6+y0+1, 6);
-			p8_rectfill(x0,y0, 6*4+x0,6+y0, 0);
-			p8_print("paused", x0+1, y0+1, 7);
+			int x0 = PICO8_W/2-3*4, y0 = 8;
+			SDL_FillRect(screen, &(SDL_Rect){x0*scale,y0*scale, (6*4+1)*scale, 7*scale}, getcolor(7));
+			p8_print("paused", x0+1, y0+1, 1);
 		} else {
 			Celeste_P8_update();
 			Celeste_P8_draw();
 		}
-		OSDdraw();
 
 		/*for (int i = 0 ; i < 16;i++) {
 			SDL_Rect rc = {i*8*scale, 0, 8*scale, 4*scale};
@@ -554,6 +526,7 @@ int main(int argc, char** argv) {
 		static unsigned frame_start = 0;
 		unsigned frame_end = SDL_GetTicks();
 		unsigned frame_time = frame_end-frame_start;
+		//printf("\nvalues : frame_time = %d", frame_time);
 		static const unsigned target_millis = 1000/30;
 		if (frame_time < target_millis) {
 			SDL_Delay((target_millis - frame_time) + (t & 1));
@@ -578,11 +551,10 @@ int main(int argc, char** argv) {
 	Mix_CloseAudio();
 	Mix_Quit();
 	SDL_Quit();
-	return 0;
 }
 
 static int gettileflag(int, int);
-static void p8_line(int,int,int,int,unsigned char);
+static void Xline(int,int,int,int,unsigned char);
 
 //lots of code from https://github.com/SDL-mirror/SDL/blob/bc59d0d4a2c814900a506d097a381077b9310509/src/video/SDL_surface.c#L625
 //coordinates should be scaled already
@@ -671,16 +643,7 @@ static inline void Xblit(SDL_Surface* src, SDL_Rect* srcrect, SDL_Surface* dst, 
 	}
 }
 
-static void p8_rectfill(int x0, int y0, int x1, int y1, int col) {
-	int w = (x1 - x0 + 1)*scale;
-	int h = (y1 - y0 + 1)*scale;
-	if (w > 0 && h > 0) {
-		SDL_Rect rc = {x0*scale,y0*scale, w,h};
-		SDL_FillRect(screen, &rc, getcolor(col));
-	}
-}
-
-static void p8_print(const char* str, int x, int y, int col) {
+static void p8_print(char* str, float x, float y, int col) {
 	for (char c = *str; c; c = *(++str)) {
 		c &= 0x7F;
 		SDL_Rect srcrc = {8*(c%16), 8*(c/16)};
@@ -694,23 +657,27 @@ static void p8_print(const char* str, int x, int y, int col) {
 	}
 }
 
-int pico8emu(CELESTE_P8_CALLBACK_TYPE call, ...) {
+Celeste_P8_val pico8emu(CELESTE_P8_CALLBACK_TYPE call, ...) {
 	static int camera_x = 0, camera_y = 0;
-	if (!enable_screenshake) {
-		camera_x = camera_y = 0;
-	}
 
 	va_list args;
-	int ret = 0;
+	Celeste_P8_val ret = {.i = 0};
 	va_start(args, call);
 	
 	#define   INT_ARG() va_arg(args, int)
 	#define  BOOL_ARG() (Celeste_P8_bool_t)va_arg(args, int)
-	#define RET_INT(_i)   do {ret = (_i); goto end;} while (0)
+	#define FLOAT_ARG() (float)va_arg(args, double)
+	#define RET_INT(_i)   do {ret.i = (_i); goto end;} while (0)
+	#define RET_FLOAT(_f) do {ret.f = (_f); goto end;} while (0)
 	#define RET_BOOL(_b) RET_INT(!!(_b))
 	#define CASE(t, ...) case t: {__VA_ARGS__;} break;
 
 	switch (call) {
+		CASE(CELESTE_P8_RND, //rnd(max)
+			float max = FLOAT_ARG();
+			float v = max * ((float)rand() / (float)RAND_MAX);
+			RET_FLOAT(v);
+		)
 		CASE(CELESTE_P8_MUSIC, //music(idx,fade,mask)
 			int index = INT_ARG();
 			int fade = INT_ARG();
@@ -729,8 +696,8 @@ int pico8emu(CELESTE_P8_CALLBACK_TYPE call, ...) {
 		)
 		CASE(CELESTE_P8_SPR, //spr(sprite,x,y,cols,rows,flipx,flipy)
 			int sprite = INT_ARG();
-			int x = INT_ARG();
-			int y = INT_ARG();
+			float x = FLOAT_ARG();
+			float y = FLOAT_ARG();
 			int cols = INT_ARG();
 			int rows = INT_ARG();
 			int flipx = BOOL_ARG();
@@ -774,10 +741,12 @@ int pico8emu(CELESTE_P8_CALLBACK_TYPE call, ...) {
 			ResetPalette();
 		)
 		CASE(CELESTE_P8_CIRCFILL, //circfill(x,y,r,col)
-			int cx = INT_ARG() - camera_x;
-			int cy = INT_ARG() - camera_y;
-			int r = INT_ARG();
+			float cx_ = FLOAT_ARG() - camera_x;
+			float cy_ = FLOAT_ARG() - camera_y;
+			float r = FLOAT_ARG();
 			int col = INT_ARG();
+
+			int cx = floorf(cx_), cy = floorf(cy_);
 
 			int realcolor = getcolor(col);
 
@@ -800,8 +769,8 @@ int pico8emu(CELESTE_P8_CALLBACK_TYPE call, ...) {
 
 				//this algorithm doesn't account for the diameters
 				//so we have to set them manually
-				p8_line(cx,cy-y, cx,cy+r, col);
-				p8_line(cx+r,cy, cx-r,cy, col);
+				Xline(cx,cy-y, cx,cy+r, col);
+				Xline(cx+r,cy, cx-r,cy, col);
 
 				while (x < y) {
 					if (f >= 0) {
@@ -814,45 +783,50 @@ int pico8emu(CELESTE_P8_CALLBACK_TYPE call, ...) {
 					f += ddFx;
 
 					//build our current arc
-					p8_line(cx+x,cy+y, cx-x,cy+y, col);
-					p8_line(cx+x,cy-y, cx-x,cy-y, col);
-					p8_line(cx+y,cy+x, cx-y,cy+x, col);
-					p8_line(cx+y,cy-x, cx-y,cy-x, col);
+					Xline(cx+x,cy+y, cx-x,cy+y, col);
+					Xline(cx+x,cy-y, cx-x,cy-y, col);
+					Xline(cx+y,cy+x, cx-y,cy+x, col);
+					Xline(cx+y,cy-x, cx-y,cy-x, col);
 				}
 			}
 		)
 		CASE(CELESTE_P8_PRINT, //print(str,x,y,col)
-			const char* str = va_arg(args, const char*);
-			int x = INT_ARG() - camera_x;
-			int y = INT_ARG() - camera_y;
+			char* str = va_arg(args, char*);
+			float x = FLOAT_ARG() - camera_x;
+			float y = FLOAT_ARG() - camera_y;
 			int col = INT_ARG() % 16;
 
-#ifdef _3DS
+//#ifdef _3DS
 			if (!strcmp(str, "x+c")) {
 				//this is confusing, as 3DS uses a+b button, so use this hack to make it more appropiate
 				str = "a+b";
 			}
-#endif
+//#endif
 
 			p8_print(str,x,y,col);
 		)
 		CASE(CELESTE_P8_RECTFILL, //rectfill(x0,y0,x1,y1,col)
-			int x0 = INT_ARG() - camera_x;
-			int y0 = INT_ARG() - camera_y;
-			int x1 = INT_ARG() - camera_x;
-			int y1 = INT_ARG() - camera_y;
+			float x0 = FLOAT_ARG() - camera_x;
+			float y0 = FLOAT_ARG() - camera_y;
+			float x1 = FLOAT_ARG() - camera_x;
+			float y1 = FLOAT_ARG() - camera_y;
 			int col = INT_ARG();
 
-			p8_rectfill(x0,y0,x1,y1,col);
+			int w = (x1-x0+1)*scale;
+			int h = (y1-y0+1)*scale;
+			if (w>0 && h>0) {
+				SDL_Rect rc = {x0*scale,y0*scale, w,h};
+				SDL_FillRect(screen, &rc, getcolor(col));
+			}
 		)
 		CASE(CELESTE_P8_LINE, //line(x0,y0,x1,y1,col)
-			int x0 = INT_ARG() - camera_x;
-			int y0 = INT_ARG() - camera_y;
-			int x1 = INT_ARG() - camera_x;
-			int y1 = INT_ARG() - camera_y;
+			float x0 = FLOAT_ARG() - camera_x;
+			float y0 = FLOAT_ARG() - camera_y;
+			float x1 = FLOAT_ARG() - camera_x;
+			float y1 = FLOAT_ARG() - camera_y;
 			int col = INT_ARG();
 
-			p8_line(x0,y0,x1,y1,col);
+			Xline(x0,y0,x1,y1,col);
 		)
 		CASE(CELESTE_P8_MGET, //mget(tx,ty)
 			int tx = INT_ARG();
@@ -861,10 +835,8 @@ int pico8emu(CELESTE_P8_CALLBACK_TYPE call, ...) {
 			RET_INT(tilemap_data[tx+ty*128]);
 		)
 		CASE(CELESTE_P8_CAMERA, //camera(x,y)
-			if (enable_screenshake) {
-				camera_x = INT_ARG();
-				camera_y = INT_ARG();
-			}
+			camera_x = INT_ARG();
+			camera_y = INT_ARG();
 		)
 		CASE(CELESTE_P8_FGET, //fget(tile,flag)
 			int tile = INT_ARG();
@@ -921,7 +893,7 @@ static int gettileflag(int tile, int flag) {
 }
 
 //coordinates should NOT be scaled before calling this
-static void p8_line(int x0, int y0, int x1, int y1, unsigned char color) {
+static void Xline(int x0, int y0, int x1, int y1, unsigned char color) {
 	#define CLAMP(v,min,max) v = v < min ? min : v >= max ? max-1 : v;
 	CLAMP(x0,0,screen->w);
 	CLAMP(y0,0,screen->h);
